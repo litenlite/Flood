@@ -1,0 +1,131 @@
+parameters:
+  - name: slotName
+    type: string
+    default: $(Build.SourceBranchName)
+    
+trigger:
+- none
+
+pool:
+  vmImage: ubuntu-latest
+
+stages:
+
+
+- stage: Build
+  displayName: Build Web App
+  pool:
+    vmImage: windows-latest
+  jobs:
+  - job: Build
+    steps:
+
+    - task: DotNetCoreCLI@2
+      displayName: Build site to publish
+      inputs:
+        command: 'publish'
+        publishWebProjects: true
+        
+    - task: CopyFiles@2
+      displayName: Copy website
+      inputs:
+        sourceFolder: '$(Build.SourcesDirectory)/src/ToyCompany/ToyCompany.Website/bin'
+        contents: '**/publish.zip'
+        targetFolder: '$(Build.ArtifactStagingDirectory)/website'
+        flattenFolders: true
+
+    - task: PublishBuildArtifacts@1
+      displayName: Publish website as pipeline '$(Build.ArtifactStagingDirectory)/website'
+      inputs:
+        pathToPublish: '$(Build.ArtifactStagingDirectory)/website'
+        artifactName: 'website'
+
+- stage: DeploySlot
+  displayName: Deploy Bicep
+  jobs:
+  - job: DeployBicepCode
+    displayName: Deploy bicep code
+    variables:
+      - group: Flood
+    steps:
+      - task: AzureResourceManagerTemplateDeployment@3
+        name: CreateResources
+        displayName: Create Azure Resources
+        inputs:
+          connectedServiceName: Flood
+          deploymentName: $(Build.BuildNumber)
+          resourceGroupName: $(ResourceGroupName)
+          location: resourceGroup().location
+          csmFile: deploy/slot.bicep
+          overrideParameters: >
+            -appServiceAppName $(AppServiceName)
+            -appServicePlanName $(AppServicePlanName)
+            -appSlotName ${{parameters.slotName}}
+          deploymentOutputs: deploymentOutputs
+      - bash: |
+          echo "saving host name"
+          slotHostName=$(echo $DEPLOYMENT_OUTPUTS| jq -r '.slotName.value')
+          mkdir -p $(Pipeline.Workspace)/variables
+          echo "$slotHostName" > $(Pipeline.Workspace)/variables/slotHostName
+          echo "sleeping to let Azure catch up."
+          sleep 1m
+        name: ShortNap
+        displayName: Sleep 1 minutes
+        env:
+          DEPLOYMENT_OUTPUTS: $(deploymentOutputs)
+      - publish: $(Pipeline.Workspace)/variables
+        artifact: variables
+
+- stage: DeployApp
+  displayName: Deploy App
+  jobs:
+  - job: DeployAppCode
+    displayName: Deploy application code
+    variables:
+      - group: Heracles
+    steps:
+      - download: current
+        artifact: website
+      - task: AzureRmWebAppDeployment@4
+        name: DeployAppCode
+        displayName: Deploy application code
+        inputs:
+          appType: webApp
+          ConnectionType: AzureRM
+          ConnectedServiceName: sc-heracles
+          WebAppName: $(appServiceName)
+          Package: '$(Pipeline.Workspace)/website/publish.zip'  
+          DeployToSlotOrASEFlag: true    
+          SlotName: ${{parameters.slotName}}
+          ResourceGroupName: $(appResourceGroup)
+
+- stage: SmokeTest
+  displayName: Smoke test application
+  jobs:
+  - job: SmokeTest
+    displayName: Smoke test
+    steps:
+      - download: current
+        artifact: variables
+      - bash: |
+          slotHostName=$(cat $(Pipeline.Workspace)/variables/slotHostName)
+          echo "##vso[task.setvariable variable=slotHostName]$slotHostName"        
+      - task: PowerShell@2
+        name: RunSmokeTests
+        displayName: Run smoke tests
+        inputs: 
+          targetType: inline
+          script: |
+            $container = New-PesterContainer `
+              -Path 'deploy/Website.Tests.ps1' `
+              -Data @{ HostName = '$(slotHostName)' }
+            Invoke-Pester `
+              -Container $container `
+              -CI
+      - task: PublishTestResults@2
+        name: PublishTestResults
+        displayName: Publish test results
+        condition: always()
+        inputs: 
+          testResultsFormat: NUnit
+          testResultsFiles: 'testResults.xml'

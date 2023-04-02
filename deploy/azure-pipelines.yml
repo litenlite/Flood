@@ -1,0 +1,206 @@
+parameters:
+  - name: defaultLocation
+    type: string
+    default: eastus
+
+trigger:
+- none
+
+pool:
+  vmImage: ubuntu-latest
+
+stages:
+
+
+- stage: Build
+  displayName: Build Database
+  pool:
+    vmImage: windows-latest
+  jobs:
+  - job: Build
+    steps:
+
+    - task: VSBuild@1
+      displayName: Build SQL project
+      inputs: 
+        solution: '$(Build.SourcesDirectory)/src/ToyCompany/ToyCompany.Database/ToyCompany.Database.sqlproj'
+
+    - task: CopyFiles@2
+      displayName: Copy DACPAC
+      inputs:
+        sourceFolder: '$(Build.SourcesDirectory)/src/ToyCompany/ToyCompany.Database/bin'
+        contents: '**/*.dacpac'
+        targetFolder: '$(Build.ArtifactStagingDirectory)/database'
+        flattenFolders: true
+
+    - task: PublishBuildArtifacts@1
+      displayName: Publish DACPAC as pipeline artifact
+      inputs:
+        pathToPublish: '$(Build.ArtifactStagingDirectory)/database'
+        artifactName: 'database'
+
+- stage: Lint
+  displayName: Lint Bicep code
+  jobs:
+    - job: Lint
+      steps: 
+        - script: |
+            az bicep build --file deploy/main.bicep
+          name: LintBicepCode
+          displayName: Lint Bicep code
+
+- stage: Validate
+  displayName: Validate Azure
+  jobs:
+  - job: ValidateBicepCode
+    displayName: Validate bicep code
+    variables:
+    - group: Flood
+    steps: 
+      - task: AzureResourceManagerTemplateDeployment@3
+        name: RunPreflightValidation
+        displayName: Run preflight validation
+        inputs:
+          connectedServiceName: Flood
+          location: ${{parameters.defaultLocation}}
+          deploymentMode: Validation
+          resourceGroupName: $(ResourceGroupName)
+          csmFile: deploy/main.bicep
+          overrideParameters: >
+            -sqlServerAdministratorLogin $(SqlServerAdministratorLogin)
+            -sqlServerAdministratorLoginPassword $(SqlServerAdministratorLoginPassword)
+
+- stage: DeployIaC
+  displayName: Deploy Bicep
+  jobs:
+  - job: DeployBicepCode
+    displayName: Deploy bicep code
+    variables:
+      - group: Flood
+    steps:
+      - task: AzureResourceManagerTemplateDeployment@3
+        name: CreateResources
+        displayName: Create Azure Resources
+        inputs:
+          connectedServiceName: Flood
+          deploymentName: $(Build.BuildNumber)
+          location: ${{parameters.defaultLocation}}
+          resourceGroupName: $(ResourceGroupName)
+          csmFile: deploy/main.bicep
+          overrideParameters: >
+            -sqlServerAdministratorLogin $(SqlServerAdministratorLogin)
+            -sqlServerAdministratorLoginPassword $(SqlServerAdministratorLoginPassword)
+          deploymentOutputs: deploymentOutputs
+      - bash: |
+          storageAccountName=$(echo $DEPLOYMENT_OUTPUTS| jq -r '.storageAccountName.value')
+          blobContainerName=$(echo $DEPLOYMENT_OUTPUTS| jq -r '.blobContainerName.value')
+          sqlFQDN=$(echo $DEPLOYMENT_OUTPUTS| jq -r '.sqlFQDN.value')
+          sqlDatabaseName=$(echo $DEPLOYMENT_OUTPUTS| jq -r '.sqlDatabaseName.value')
+          mkdir -p $(Pipeline.Workspace)/variables
+          echo "$storageAccountName" > $(Pipeline.Workspace)/variables/storageAccountName
+          echo "$blobContainerName" > $(Pipeline.Workspace)/variables/blobContainerName
+          echo "$sqlFQDN" > $(Pipeline.Workspace)/variables/sqlFQDN
+          echo "$sqlDatabaseName" > $(Pipeline.Workspace)/variables/sqlDatabaseName
+        name: SaveDeploymentOutputs
+        displayName: Save output variables from resource deployment
+        env:
+          DEPLOYMENT_OUTPUTS: $(deploymentOutputs)   
+      - publish: $(Pipeline.Workspace)/variables
+        artifact: variables
+      - bash: |
+          echo "sleeping to let Azure catch up...db create takes time apparently"
+          sleep 5m
+        name: ShortNap
+        displayName: Sleep 5 minutes
+ 
+- stage: DeployDatabase
+  displayName: Deploy Database
+  pool:
+    vmImage: windows-latest
+  jobs:
+  - job: DeployDACPAC
+    displayName: Deploy DACPAC to database
+    variables:
+      - group: Flood
+    steps:
+      - download: current
+        artifact: variables
+      - download: current
+        artifact: database
+      - powershell: |
+           $sqlFQDN=$(type $(Pipeline.Workspace)/variables/sqlFQDN)
+           Write-Host "##vso[task.setvariable variable=sqlFQDN]$sqlFQDN"
+           $sqlDatabaseName=$(type $(Pipeline.Workspace)/variables/sqlDatabaseName)
+           Write-Host "##vso[task.setvariable variable=sqlDatabaseName]$sqlDatabaseName"
+      - task: SqlAzureDacpacDeployment@1
+        name: DeploySqlDatabaseDacpac
+        displayName: Deploy DACPAC to database
+        inputs:
+          ConnectedServiceNameARM: Flood
+          authenticationType: 'server'
+          serverName: $(sqlFQDN)
+          databaseName: $(sqlDatabaseName)
+          sqlUsername: $(SqlServerAdministratorLogin)
+          sqlPassword: $(SqlServerAdministratorLoginPassword)
+          deployType: 'DacpacTask'
+          deploymentAction: 'Publish'
+          dacpacFile: '$(Pipeline.Workspace)/database/ToyCompany.Database.dacpac'
+
+- stage: AddTestData
+  displayName: Add test data to database
+  pool:
+    vmImage: windows-latest
+  jobs:
+  - job: AddTestData
+    displayName: Add test data to database
+    variables:
+      - group: Flood
+    steps:
+      - download: current
+        artifact: variables
+      - powershell: |
+            $sqlFQDN=$(type $(Pipeline.Workspace)/variables/sqlFQDN)
+            Write-Host "##vso[task.setvariable variable=sqlFQDN]$sqlFQDN"
+            $sqlDatabaseName=$(type $(Pipeline.Workspace)/variables/sqlDatabaseName)
+            Write-Host "##vso[task.setvariable variable=sqlDatabaseName]$sqlDatabaseName"
+      - task: SqlAzureDacpacDeployment@1
+        name: AddTestData
+        displayName: Add test data to database
+        inputs:
+          ConnectedServiceNameARM: Flood
+          authenticationType: 'server'
+          serverName: $(sqlFQDN)
+          databaseName: $(sqlDatabaseName)
+          sqlUsername: $(SqlServerAdministratorLogin)
+          sqlPassword: $(SqlServerAdministratorLoginPassword)
+          deployType: 'sqlTask'
+          sqlFile: 'deploy/sample-data/Toys.sql' 
+      - bash: |
+        echo "add sas key to variables... you have 2 minutes"
+        sleep 2m
+
+- stage: UploadSampleImages
+  displayName: Upload sample images
+  jobs:
+    - job: UploadSampleImages
+      displayName:  Upload sample images
+      steps:
+      - download: current
+        artifact: variables
+      - bash: |
+          storageAccountName=$(cat $(Pipeline.Workspace)/variables/storageAccountName)
+          echo "##vso[task.setvariable variable=storageAccountName]$storageAccountName"
+          blobContainerName=$(cat $(Pipeline.Workspace)/variables/blobContainerName)
+          echo "##vso[task.setvariable variable=blobContainerName]$blobContainerName"
+      - task: AzureCLI@2
+        name: UploadSampleImages
+        displayName: Upload sample images
+        inputs:
+          azureSubscription: Flood
+          scriptType: 'bash'
+          scriptLocation: 'inlineScript'
+          inlineScript: |
+            az storage blob upload-batch \
+              --account-name $(storageAccountName) \
+              --destination $(blobContainerName) \
+              --source 'deploy/sample-data/toyimages'
