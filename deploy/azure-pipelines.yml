@@ -201,6 +201,7 @@ stages:
           scriptLocation: 'inlineScript'
           inlineScript: |
             az storage blob upload-batch \
+              --sas-token "$(sas-token)" \
               --account-name $(storageAccountName) \
               --destination $(blobContainerName) \
               --source 'deploy/sample-data/toyimages'
