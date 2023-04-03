@@ -14,14 +14,19 @@ Microsoft defines it as "the management of infrastructure in a descriptive model
 Sample application code (online toy store) is copied directly from [Microsoft Learning path](https://docs.microsoft.com/en-us/learn/paths/bicep-azure-pipelines/).
 IaC code from tutorial has been modified for reference app, source code for website is 'as is'
 
-## Pipeline stages (Heracles-Base) 
+## Pipeline stages (Flood-Base) 
 1. Build database code: build sqlproj, copy files, publish pipeline artifact
 2. Lint bicep code: runs `az bicep build` 
-3. Validate Azure deployment: runs bicep code in validation mode
-4. Deploy bicep code (includes app service): runs bicep code and saves output to pipeline variables
+3. Validate Azure deployment: runs bicep code in validation mode **requires variables to be set in pipeline library**
+4. Deploy bicep code (includes app service): runs bicep code and saves output to pipeline variables 
+
+*note: once this step is compete, create sas key and update pipeline variables*
+
 5. Deploy database code: executes dacpac deployment
 6. Deploy SQL script (test data): executes ad-hoc sql script
-7. Deploy images to blob storage: uploads images to blob storage
+7. Deploy images to blob storage: uploads images to blob storage 
+
+*note: not crazy about this design, but it used to work without sas-token - fine for poc*
 
 ## Pipeline stages (Slotter)
 1. Build app code: build web app, copy files, publish pipeline artifact
@@ -31,12 +36,7 @@ IaC code from tutorial has been modified for reference app, source code for webs
 
 ### Running Slotter
 
-1. Create app service using Azure CLI (or portal)
-
-`   az appservice plan create -n <name> -g debug-heracles --sku S1 `  
-`   az webapp create -n <name> -g debug-heracles -p <plan name> ` 
-
-**webapp name must be globally unique**
+1. Run Flood-Base to generate app service and other resources
 
 2. Update pipeline variable group
 
