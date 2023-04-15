@@ -192,8 +192,6 @@ stages:
           echo "##vso[task.setvariable variable=storageAccountName]$storageAccountName"
           blobContainerName=$(cat $(Pipeline.Workspace)/variables/blobContainerName)
           echo "##vso[task.setvariable variable=blobContainerName]$blobContainerName"
-          rgName=$(cat $(Pipeline.Workspace)/variables/rgName)
-          echo "##vso[task.setvariable variable=rgName]$rgName"
       - task: AzureCLI@2
         name: UploadSampleImages
         displayName: Upload sample images
